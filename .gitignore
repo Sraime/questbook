@@ -49,3 +49,9 @@ app.*.map.json
 
 # Local AI assistant tool config (machine-specific, not project source)
 .claude/
+
+# Signing secrets — never commit these
+/.secrets/
+/android/key.properties
+*.jks
+*.keystore
