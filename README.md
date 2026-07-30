@@ -16,6 +16,7 @@ Questbook est une application Flutter de compagnon de jeu de rôle sur table : c
 - [Génération de code](#génération-de-code)
 - [Exécution](#exécution)
 - [Tests](#tests)
+- [Workflow git (branches)](#workflow-git-branches)
 - [Distribution Android (signature, Firebase, CI/CD)](#distribution-android-signature-firebase-cicd)
   - [Vue d'ensemble](#vue-densemble)
   - [Signature de release](#signature-de-release)
@@ -202,6 +203,37 @@ Tests actuellement présents (`test/`) :
 - `domain/rules/cthulhu_rules_engine_test.dart` — mécaniques de jet (caractéristiques, dérivées, jets de compétence).
 - `services/dice_service_test.dart` — primitives de lancer de dés.
 
+## Workflow git (branches)
+
+Le dépôt suit un git-flow simplifié à deux branches :
+
+- **`dev`** — branche de travail. Toutes les modifications (features, fixes,
+  docs…) sont commitées ici (directement ou via des branches
+  `feature/xxx` ouvertes depuis `dev`, selon la taille du changement).
+  Pousser sur `dev` **ne déclenche aucun build/déploiement**.
+- **`main`** — branche de release, protégée. Elle ne doit être mise à jour
+  que via une **Pull Request `dev` → `main`**, jamais par un push direct.
+  C'est le *merge* de cette PR qui déclenche automatiquement la CI (build +
+  distribution Firebase App Distribution — voir section suivante).
+
+En pratique :
+
+```bash
+git checkout dev
+# ... commits de travail ...
+git push origin dev
+# Puis, une fois prêt à livrer une version aux testeurs :
+# ouvrir une Pull Request "dev → main" sur GitHub et la merger.
+```
+
+> ℹ️ Pour que `main` reste vraiment protégée, active sur GitHub
+> `Settings → Branches → Branch protection rules` une règle sur `main`
+> exigeant une Pull Request avant tout merge (« Require a pull request
+> before merging »). Sans ça, rien n'empêche techniquement un push direct
+> sur `main`, qui ne déclencherait d'ailleurs pas la CI non plus (le
+> workflow n'écoute que l'événement « Pull Request fermée en tant que
+> merged », pas les push) — mais court-circuiterait la revue de code.
+
 ## Distribution Android (signature, Firebase, CI/CD)
 
 ### Vue d'ensemble
@@ -213,7 +245,7 @@ Firestore…) intégré dans l'app elle-même, uniquement de l'outillage de
 distribution. Le flux complet, une fois poussé sur `main` :
 
 ```
-push sur main
+Pull Request "dev → main" mergée sur GitHub
    └─▶ GitHub Actions (.github/workflows/firebase-distribution.yml)
           ├─ flutter build apk --release   (signé avec la clé "upload")
           └─ firebase appdistribution:distribute
@@ -282,9 +314,16 @@ git** :
 
 Le workflow [`.github/workflows/firebase-distribution.yml`](.github/workflows/firebase-distribution.yml)
 se déclenche :
-- automatiquement à chaque `push` sur `main` ;
+- automatiquement quand une **Pull Request vers `main` est mergée**
+  (événement `pull_request` de type `closed`, filtré par
+  `github.event.pull_request.merged == true` pour ignorer les PR fermées
+  sans être mergées) — voir [Workflow git](#workflow-git-branches) ;
 - ou manuellement depuis l'onglet **Actions** du repo GitHub (bouton
   « Run workflow »), avec des notes de version personnalisées en option.
+
+Volontairement, un simple `push` sur `main` (ou sur toute autre branche) ne
+déclenche **rien** : ça évite de redéployer un build de test à chaque petit
+commit (doc, refactor…) qui n'apporte aucune évolution fonctionnelle.
 
 Il enchaîne : checkout → setup Flutter/JDK → `flutter pub get` → décodage du
 keystore + écriture de `key.properties` à partir des secrets → 
