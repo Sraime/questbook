@@ -1,0 +1,317 @@
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:lucide_icons_flutter/lucide_icons.dart';
+
+import '../../design_system/components/qb_badge.dart';
+import '../../design_system/components/qb_button.dart';
+import '../../design_system/components/qb_card.dart';
+import '../../design_system/components/qb_icon_button.dart';
+import '../../design_system/components/qb_input.dart';
+import '../../design_system/components/qb_inventory_row.dart';
+import '../../design_system/components/qb_page_background.dart';
+import '../../design_system/components/qb_stat_dial.dart';
+import '../../design_system/components/qb_tabs.dart';
+import '../../design_system/tokens/colors.dart';
+import '../../design_system/tokens/spacing.dart';
+import '../../design_system/tokens/typography.dart';
+import '../../domain/models/character.dart';
+import '../../domain/models/tone.dart';
+import 'providers/character_detail_provider.dart';
+import 'widgets/resource_edit_dialog.dart';
+import 'widgets/skill_roll_dialog.dart';
+
+/// Screens 1c (Aperçu) / 1d (Inventaire) — a single sheet screen, tabs
+/// toggled in-page, matching the mockup.
+class CharacterSheetScreen extends ConsumerStatefulWidget {
+  const CharacterSheetScreen({super.key, required this.characterId});
+
+  final String characterId;
+
+  @override
+  ConsumerState<CharacterSheetScreen> createState() =>
+      _CharacterSheetScreenState();
+}
+
+class _CharacterSheetScreenState extends ConsumerState<CharacterSheetScreen> {
+  String _tab = 'Aperçu';
+
+  @override
+  Widget build(BuildContext context) {
+    final characterAsync =
+        ref.watch(characterDetailProvider(widget.characterId));
+
+    return QBPageBackground(
+      child: SafeArea(
+        bottom: false,
+        child: characterAsync.when(
+          data: (character) {
+            if (character == null) {
+              return const Center(child: Text('Personnage introuvable'));
+            }
+            return ListView(
+              padding: const EdgeInsets.fromLTRB(18, 24, 18, 90),
+              children: [
+                _Header(character: character),
+                const SizedBox(height: QBSpace.s4),
+                QBTabs(
+                  tabs: const ['Aperçu', 'Inventaire'],
+                  active: _tab,
+                  onChanged: (tab) => setState(() => _tab = tab),
+                ),
+                const SizedBox(height: QBSpace.s5),
+                if (_tab == 'Aperçu')
+                  _OverviewTab(character: character)
+                else
+                  _InventoryTab(character: character),
+              ],
+            );
+          },
+          loading: () => const Center(child: CircularProgressIndicator()),
+          error: (error, stack) => Center(child: Text('Erreur : $error')),
+        ),
+      ),
+    );
+  }
+}
+
+class _Header extends StatelessWidget {
+  const _Header({required this.character});
+
+  final Character character;
+
+  @override
+  Widget build(BuildContext context) {
+    final subtitle = character.occupation == null
+        ? 'Niveau ${character.level}'
+        : '${character.occupation} — niveau ${character.level}';
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          character.name,
+          style: QBType.game().copyWith(
+            fontWeight: QBType.weightBold,
+            fontSize: 22,
+            color: QBColors.ink900,
+          ),
+        ),
+        Text(
+          subtitle,
+          style: QBType.body().copyWith(
+            fontSize: QBType.sm,
+            color: QBColors.textMuted,
+          ),
+        ),
+        const SizedBox(height: QBSpace.s3),
+        Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Expanded(
+              child: Wrap(
+                spacing: QBSpace.s2,
+                runSpacing: QBSpace.s2,
+                children: [
+                  for (final resource in character.resources)
+                    GestureDetector(
+                      onTap: () => ResourceEditDialog.show(
+                        context,
+                        characterId: character.id,
+                        resourceKey: resource.key,
+                        title: _resourceTitle(resource.key),
+                      ),
+                      child: QBBadge(
+                        label: '${resource.label} ${resource.current}/${resource.max}',
+                        tone: _mapTone(resource.tone),
+                      ),
+                    ),
+                ],
+              ),
+            ),
+            QBIconButton(
+              icon: const Icon(LucideIcons.share2, size: 16, color: QBColors.ink700),
+              label: 'Partager la fiche',
+              size: 36,
+              onPressed: () => ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(content: Text('Bientôt disponible')),
+              ),
+            ),
+          ],
+        ),
+      ],
+    );
+  }
+
+  String _resourceTitle(String key) => switch (key) {
+        'PV' => 'Points de vie',
+        'SAN' => 'Santé mentale',
+        'PM' => 'Points de magie',
+        _ => key,
+      };
+
+  QBTone _mapTone(Tone tone) => switch (tone) {
+        Tone.neutral => QBTone.neutral,
+        Tone.danger => QBTone.danger,
+        Tone.success => QBTone.success,
+        Tone.warning => QBTone.warning,
+        Tone.info => QBTone.info,
+      };
+}
+
+class _OverviewTab extends StatelessWidget {
+  const _OverviewTab({required this.character});
+
+  final Character character;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        _sectionTitle('Caractéristiques'),
+        Wrap(
+          alignment: WrapAlignment.center,
+          runSpacing: 14,
+          children: [
+            for (final stat in character.characteristics)
+              QBStatDial(label: stat.label, value: stat.value),
+          ],
+        ),
+        const SizedBox(height: QBSpace.s4),
+        _sectionTitle('Compétences'),
+        QBCard(
+          padding: EdgeInsets.zero,
+          child: Column(
+            children: [
+              for (var i = 0; i < character.skills.length; i++)
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 11),
+                  decoration: BoxDecoration(
+                    border: i < character.skills.length - 1
+                        ? const Border(bottom: BorderSide(color: QBColors.borderHairline))
+                        : null,
+                  ),
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      Text(
+                        character.skills[i].label,
+                        style: QBType.body()
+                            .copyWith(fontSize: QBType.sm, color: QBColors.ink900),
+                      ),
+                      Text(
+                        '${character.skills[i].value}%',
+                        style: QBType.mono().copyWith(
+                          fontWeight: QBType.weightBold,
+                          fontSize: QBType.sm,
+                          color: QBColors.ink900,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+            ],
+          ),
+        ),
+        const SizedBox(height: QBSpace.s4),
+        QBButton(
+          label: 'Lancer un dé',
+          variant: QBButtonVariant.primary,
+          expand: true,
+          onPressed: character.skills.isEmpty
+              ? null
+              : () => SkillRollDialog.show(context, character),
+        ),
+      ],
+    );
+  }
+
+  Widget _sectionTitle(String title) => Padding(
+        padding: const EdgeInsets.only(bottom: 10),
+        child: Text(
+          title,
+          style: QBType.game().copyWith(
+            fontWeight: QBType.weightSemibold,
+            fontSize: 13,
+            letterSpacing: 13 * QBType.trackingWide,
+            color: QBColors.leather800,
+          ),
+        ),
+      );
+}
+
+class _InventoryTab extends ConsumerStatefulWidget {
+  const _InventoryTab({required this.character});
+
+  final Character character;
+
+  @override
+  ConsumerState<_InventoryTab> createState() => _InventoryTabState();
+}
+
+class _InventoryTabState extends ConsumerState<_InventoryTab> {
+  final _nameController = TextEditingController();
+
+  @override
+  void dispose() {
+    _nameController.dispose();
+    super.dispose();
+  }
+
+  void _addItem() {
+    final name = _nameController.text.trim();
+    if (name.isEmpty) return;
+    ref
+        .read(characterActionsProvider)
+        .addInventoryItem(widget.character.id, name: name);
+    _nameController.clear();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final inventory = widget.character.inventory;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Container(
+          padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 2),
+          decoration: BoxDecoration(
+            color: QBColors.leather900,
+            border: Border.all(color: QBColors.slotBorder, width: 3),
+            borderRadius: BorderRadius.circular(QBRadius.lg),
+          ),
+          child: inventory.isEmpty
+              ? Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 16),
+                  child: Text(
+                    'Aucun objet pour l’instant.',
+                    style: QBType.body().copyWith(color: QBColors.paper300),
+                  ),
+                )
+              : Column(
+                  children: [
+                    for (final item in inventory)
+                      QBInventoryRow(
+                        name: item.name,
+                        qty: item.qty,
+                        weight: item.weight,
+                        onRemove: () => ref
+                            .read(characterActionsProvider)
+                            .removeInventoryItem(item.id),
+                      ),
+                  ],
+                ),
+        ),
+        const SizedBox(height: QBSpace.s3),
+        QBInput(controller: _nameController, placeholder: 'Ajouter un objet…'),
+        const SizedBox(height: QBSpace.s2),
+        QBButton(
+          label: 'Ajouter',
+          variant: QBButtonVariant.secondary,
+          expand: true,
+          onPressed: _addItem,
+        ),
+      ],
+    );
+  }
+}
