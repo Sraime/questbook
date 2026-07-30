@@ -16,6 +16,13 @@ Questbook est une application Flutter de compagnon de jeu de rôle sur table : c
 - [Génération de code](#génération-de-code)
 - [Exécution](#exécution)
 - [Tests](#tests)
+- [Distribution Android (signature, Firebase, CI/CD)](#distribution-android-signature-firebase-cicd)
+  - [Vue d'ensemble](#vue-densemble)
+  - [Signature de release](#signature-de-release)
+  - [Firebase App Distribution](#firebase-app-distribution)
+  - [CI GitHub Actions](#ci-github-actions)
+  - [Déployer manuellement (sans la CI)](#déployer-manuellement-sans-la-ci)
+  - [Reprendre ce setup sur une nouvelle machine](#reprendre-ce-setup-sur-une-nouvelle-machine)
 - [Limitations connues](#limitations-connues)
 
 ## Aperçu fonctionnel
@@ -195,9 +202,156 @@ Tests actuellement présents (`test/`) :
 - `domain/rules/cthulhu_rules_engine_test.dart` — mécaniques de jet (caractéristiques, dérivées, jets de compétence).
 - `services/dice_service_test.dart` — primitives de lancer de dés.
 
+## Distribution Android (signature, Firebase, CI/CD)
+
+### Vue d'ensemble
+
+Le projet est connecté à un projet Firebase (**`questbook-48540`**) uniquement
+pour distribuer des builds de test aux beta-testeurs via **Firebase App
+Distribution** — il n'y a aujourd'hui aucun SDK Firebase (Auth, Analytics,
+Firestore…) intégré dans l'app elle-même, uniquement de l'outillage de
+distribution. Le flux complet, une fois poussé sur `main` :
+
+```
+push sur main
+   └─▶ GitHub Actions (.github/workflows/firebase-distribution.yml)
+          ├─ flutter build apk --release   (signé avec la clé "upload")
+          └─ firebase appdistribution:distribute
+                 └─▶ groupe de testeurs "testeurs" sur Firebase App Distribution
+                        └─▶ email + lien de téléchargement pour chaque testeur
+```
+
+Trois briques composent ce dispositif, détaillées ci-dessous : la **signature
+release**, le **projet Firebase**, et le **workflow CI**.
+
+### Signature de release
+
+Par défaut, un projet Flutter fraîchement créé signe ses builds `release`
+avec la clé de debug (`android/app/build.gradle.kts` originel) — ce qui
+fonctionne mais n'est pas une vraie release signée. Ce repo utilise une
+vraie clé de signature dédiée (« clé upload »), stockée **hors du dépôt
+git** :
+
+- La clé elle-même (`upload-keystore.jks`, RSA 2048, alias `upload`) et ses
+  mots de passe ne sont **jamais commités** — ils vivent uniquement dans un
+  dossier local `.secrets/` (gitignoré) et dans les secrets GitHub Actions
+  (voir plus bas).
+- `android/app/build.gradle.kts` lit un fichier `android/key.properties`
+  (également gitignoré) au moment du build :
+
+  ```properties
+  storePassword=...
+  keyPassword=...
+  keyAlias=upload
+  storeFile=/chemin/vers/upload-keystore.jks
+  ```
+
+  Si `android/key.properties` n'existe pas (ex. sur un checkout tout frais
+  sans accès au keystore), le build `release` **retombe automatiquement sur
+  la signature debug** — `flutter run --release` continue donc de fonctionner
+  sans configuration supplémentaire, seule la distribution vers de vrais
+  testeurs nécessite la vraie clé.
+- Pourquoi un seul mot de passe (`storePassword` == `keyPassword`) ? Les
+  keystores `PKCS12` (format par défaut des JDK récents) ne supportent pas
+  des mots de passe distincts pour le keystore et l'alias — `keytool` ignore
+  silencieusement `-keypass` si différent de `-storepass`.
+
+> ⚠️ **Ne perds pas ce keystore.** Pour l'instant l'app n'est distribuée que
+> via Firebase App Distribution donc ce n'est pas critique, mais le jour où
+> l'app est publiée sur le Play Store *sans* Play App Signing, perdre cette
+> clé signifie ne plus jamais pouvoir publier de mise à jour sous le même
+> `applicationId`. Sauvegarde `.secrets/upload-keystore.jks` dans un
+> gestionnaire de mots de passe/coffre-fort d'équipe.
+
+### Firebase App Distribution
+
+- **Projet Firebase** : `questbook-48540` (console :
+  [console.firebase.google.com/project/questbook-48540](https://console.firebase.google.com/project/questbook-48540)).
+- **App Android enregistrée** : package `com.questbook.questbook`, App ID
+  Firebase `1:56734402863:android:8f12f08f8eff13a8e2b9da` (visible dans
+  Project settings → General, ou via `firebase apps:list`).
+- **Groupe de testeurs** : alias `testeurs` (affiché « Testeurs Questbook »
+  dans la console). Ajouter un testeur :
+  ```bash
+  firebase appdistribution:testers:add nouveau.testeur@example.com --group-alias testeurs --project questbook-48540
+  ```
+- Chaque testeur reçoit un email d'invitation avec un lien de téléchargement
+  direct (aucun compte Google Play/bêta-test public requis).
+
+### CI GitHub Actions
+
+Le workflow [`.github/workflows/firebase-distribution.yml`](.github/workflows/firebase-distribution.yml)
+se déclenche :
+- automatiquement à chaque `push` sur `main` ;
+- ou manuellement depuis l'onglet **Actions** du repo GitHub (bouton
+  « Run workflow »), avec des notes de version personnalisées en option.
+
+Il enchaîne : checkout → setup Flutter/JDK → `flutter pub get` → décodage du
+keystore + écriture de `key.properties` à partir des secrets → 
+`flutter build apk --release` → installation de `firebase-tools` →
+`firebase appdistribution:distribute` vers le groupe `testeurs` → nettoyage
+des fichiers de signature sur le runner.
+
+Il a besoin de **5 secrets** définis dans
+`Settings → Secrets and variables → Actions` du repo GitHub :
+
+| Secret                      | Contenu                                                              |
+| ---------------------------- | --------------------------------------------------------------------- |
+| `ANDROID_KEYSTORE_BASE64`   | Le fichier `upload-keystore.jks` encodé en base64 (une seule ligne)   |
+| `ANDROID_KEYSTORE_PASSWORD` | Mot de passe du keystore (`storePassword`)                            |
+| `ANDROID_KEY_PASSWORD`      | Idem (même valeur, voir note PKCS12 ci-dessus)                        |
+| `ANDROID_KEY_ALIAS`         | `upload`                                                               |
+| `FIREBASE_TOKEN`            | Token CI généré via `firebase login:ci` (voir note de dépréciation ci-dessous) |
+
+L'App ID Firebase et le Project ID ne sont *pas* secrets — ils sont en dur
+dans le workflow (`env:` en tête de fichier).
+
+> ⚠️ `firebase login:ci` / l'option `--token` de `firebase-tools` sont
+> marquées comme dépréciées par Google au profit de l'authentification par
+> compte de service. Elles fonctionnent encore avec `firebase-tools` 15.x
+> (utilisé ici), mais si Google les retire dans une future version majeure,
+> il faudra migrer l'étape « Distribute » du workflow vers un compte de
+> service GCP (rôle *Firebase App Distribution Admin*) exposé via
+> `GOOGLE_APPLICATION_CREDENTIALS`, en remplacement de `--token`.
+
+### Déployer manuellement (sans la CI)
+
+Utile en local si tu as le keystore et que tu veux tester une distribution
+avant de pousser :
+
+```bash
+flutter build apk --release
+firebase appdistribution:distribute build/app/outputs/flutter-apk/app-release.apk \
+  --app 1:56734402863:android:8f12f08f8eff13a8e2b9da \
+  --project questbook-48540 \
+  --groups "testeurs" \
+  --release-notes "Description de ce build"
+```
+
+(nécessite `firebase login` préalable — sur Windows/PowerShell, utiliser
+`firebase.cmd` si l'exécution de scripts `.ps1` est bloquée par la
+politique d'exécution).
+
+### Reprendre ce setup sur une nouvelle machine
+
+Un `git clone` frais **n'inclut ni le keystore ni les mots de passe**
+(volontairement, ils sont gitignorés). Deux cas :
+
+- **Tu veux juste lancer/développer l'app** : rien à faire, les builds
+  `debug` et même `release` fonctionnent (signature debug de repli — voir
+  [Signature de release](#signature-de-release)).
+- **Tu veux publier/distribuer un vrai build** : il te faut le fichier
+  `upload-keystore.jks` existant (demande-le à un mainteneur ayant accès à
+  `.secrets/`, ne le régénère surtout pas — un nouveau keystore ne
+  correspondrait plus à ce qui a déjà été distribué) et recréer localement
+  un `android/key.properties` qui pointe dessus, avec les mêmes valeurs que
+  celles utilisées dans les secrets GitHub `ANDROID_KEYSTORE_*`.
+
 ## Limitations connues
 
 - Un seul système de jeu est seedé (`cthulhu-v7`) : le catalogue de compétences/caractéristiques est actuellement importé statiquement (`CthulhuSeed`) plutôt que résolu dynamiquement par `systemId`.
 - Pas de support desktop/web packagé nativement (voir ci-dessus).
 - Aucune synchronisation distante : tout est stocké en local via SQLite (Drift). Le remplacement par un backend distant se ferait en ajoutant des implémentations `Remote*Repository` et en modifiant uniquement `lib/app/providers.dart`.
 - L'écran « Tables » ne propose pas encore d'écran de détail : ouvrir une table existante est un no-op pour l'instant.
+- Distribution actuelle limitée à Firebase App Distribution (bêta-testeurs) ; pas encore de publication Play Store, ni de Play App Signing (la clé de signature `upload` est gérée manuellement — voir [Distribution Android](#distribution-android-signature-firebase-cicd)).
+- L'authentification CI Firebase (`firebase login:ci` / `--token`) repose sur un mécanisme déprécié par Google ; à migrer vers un compte de service GCP si `firebase-tools` le retire dans une future version majeure.
